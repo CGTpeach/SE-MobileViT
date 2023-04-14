@@ -66,6 +66,7 @@ class ConvLayer(nn.Module):
             bias: Optional[bool] = False,  # 卷积中是否使用偏置
             use_norm: Optional[bool] = True,  # 是否使用BN
             use_act: Optional[bool] = True,  # 是否使用激活函数
+            se: Optional[bool] = True  # 是否使用SE注意力
     ) -> None:  # 无返回值
         super().__init__()
 
@@ -97,7 +98,7 @@ class ConvLayer(nn.Module):
             stride=stride,
             groups=groups,
             padding=padding,
-            bias=bias
+            bias=bias,
         )
 
         # 将卷积层添加到block容器中
@@ -107,6 +108,9 @@ class ConvLayer(nn.Module):
         if use_norm:
             norm_layer = nn.BatchNorm2d(num_features=out_channels, momentum=0.1)  # 创建BN层
             block.add_module(name="norm", module=norm_layer)  # 添加BN层
+
+        if se:
+            block.add_module(name="se attention", module=SEModule(channel=out_channels, reduction=4))
 
         if use_act:
             act_layer = nn.SiLU()  # 创建act层
@@ -118,6 +122,33 @@ class ConvLayer(nn.Module):
     # 前向推理函数
     def forward(self, x: Tensor) -> Tensor:
         return self.block(x)
+
+
+class SEModule(nn.Module):
+    def __init__(self, channel, reduction=4):
+        super(SEModule, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Hardsigmoid()
+            # nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class Identity(nn.Module):
+    def __init__(self, channel):
+        super(Identity, self).__init__()
+
+    def forward(self, x):
+        return x
 
 
 class InvertedResidual(nn.Module):
@@ -173,20 +204,36 @@ class InvertedResidual(nn.Module):
                     use_act=True
                 ),
             )
-
-        block.add_module(
-            name="conv_3x3",
-            module=ConvLayer(
-                in_channels=hidden_dim,
-                out_channels=hidden_dim,
-                stride=stride,
-                kernel_size=3,
-                groups=hidden_dim,  # 输入通道数和分组数相同，说明使用的是深度卷积（Depth-wise Convolution）
-                bias=False,
-                use_norm=True,
-                use_act=True
-            ),
-        )
+        if stride == 1:
+            block.add_module(
+                name="conv_3x3",
+                module=ConvLayer(
+                    in_channels=hidden_dim,
+                    out_channels=hidden_dim,
+                    stride=stride,
+                    kernel_size=3,
+                    groups=hidden_dim,  # 输入通道数和分组数相同，说明使用的是深度卷积（Depth-wise Convolution）
+                    bias=False,
+                    use_norm=True,
+                    use_act=True,
+                    se=True
+                ),
+            )
+        else:
+            block.add_module(
+                name="conv_3x3",
+                module=ConvLayer(
+                    in_channels=hidden_dim,
+                    out_channels=hidden_dim,
+                    stride=stride,
+                    kernel_size=3,
+                    groups=hidden_dim,  # 输入通道数和分组数相同，说明使用的是深度卷积（Depth-wise Convolution）
+                    bias=False,
+                    use_norm=True,
+                    use_act=True,
+                    se=False
+                ),
+            )
 
         block.add_module(
             name="red_1x1",
